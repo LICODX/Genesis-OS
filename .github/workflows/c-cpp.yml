@@ -1,23 +1,55 @@
-name: C/C++ CI
+name: Build Genesis OS (UEFI)
 
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
-  build:
-
+  build-iso:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - uses: actions/checkout@v4
-    - name: configure
-      run: ./configure
-    - name: make
-      run: make
-    - name: make check
-      run: make check
-    - name: make distcheck
-      run: make distcheck
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y llvm clang lld nasm xorriso mtools git wget
+
+    - name: Download & Build Bootloader (Limine)
+      run: |
+        git clone https://github.com/limine-bootloader/limine.git --branch=v7.x-binary --depth=1
+        make -C limine
+
+    - name: Compile Kernel (64-bit Modern)
+      run: |
+        # Compile C Kernel tanpa library standar (Freestanding)
+        clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -O2 -c kernel.c -o kernel.o
+        
+        # Linking menjadi Binary
+        ld.lld -nostdlib -z max-page-size=0x1000 -Ttext=0xffffffff80000000 kernel.o -o genesis.bin
+
+    - name: Pack ISO
+      run: |
+        mkdir -p iso_root
+        cp genesis.bin iso_root/
+        cp limine.cfg iso_root/
+        cp limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/
+        
+        # Membuat Hybrid ISO (UEFI + BIOS Compatible)
+        xorriso -as mkisofs -b limine-bios-cd.bin \
+          -no-emul-boot -boot-load-size 4 -boot-info-table \
+          --efi-boot limine-uefi-cd.bin \
+          -efi-boot-part --efi-boot-image --protective-msdos-label \
+          iso_root -o genesis_os.iso
+          
+        # Deploy Bootloader ke ISO
+        ./limine/limine bios-install genesis_os.iso
+
+    - name: Upload ISO Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: genesis-os-release
+        path: genesis_os.iso
