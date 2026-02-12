@@ -16,12 +16,14 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y llvm clang lld nasm xorriso mtools git wget
+        sudo apt-get install -y llvm clang lld nasm xorriso mtools wget
 
-    - name: Download Limine Bootloader
+    - name: Download Limine Bootloader (Fixed Version)
       run: |
-        git clone https://github.com/limine-bootloader/limine.git --branch=v7.x-binary --depth=1
-        make -C limine
+        # Kita unduh versi biner yang sudah stabil agar tidak error saat di-make
+        wget https://github.com/limine-bootloader/limine/releases/download/v7.14.2/limine-7.14.2-bin.tar.gz
+        tar -xzf limine-7.14.2-bin.tar.gz
+        mv limine-7.14.2-bin limine
 
     - name: Compile OS Kernel
       run: |
@@ -29,12 +31,43 @@ jobs:
         clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -O2 -c kernel.c -o kernel.o
         ld.lld -nostdlib -z max-page-size=0x1000 -Ttext=0xffffffff80000000 kernel.o -o genesis.bin
 
-    - name: Auto-Generate Boot Config
+    - name: Auto-Generate Boot Config (limine.conf)
       run: |
-        # Script ini mencegah error "no valid entries"
-        cat << 'EOF' > limine.cfg
+        # Membuat file konfigurasi otomatis dengan ekstensi yang BENAR (.conf)
+        mkdir -p iso_root
+        cat << 'EOF' > iso_root/limine.conf
         TIMEOUT=0
         VERBOSE=yes
+
+        :Genesis OS GUI
+            PROTOCOL=limine
+            KERNEL_PATH=boot:///genesis.bin
+        EOF
+
+    - name: Pack ISO
+      run: |
+        # Pindahkan kernel ke dalam ISO
+        cp genesis.bin iso_root/
+        
+        # Pindahkan file bootloader Limine
+        cp limine/limine-bios.sys iso_root/
+        cp limine/limine-bios-cd.bin iso_root/
+        cp limine/limine-uefi-cd.bin iso_root/
+        
+        # Bungkus menjadi file .iso
+        xorriso -as mkisofs -b limine-bios-cd.bin \
+          -no-emul-boot -boot-load-size 4 -boot-info-table \
+          --efi-boot limine-uefi-cd.bin \
+          -efi-boot-part --efi-boot-image --protective-msdos-label \
+          iso_root -o genesis_os.iso
+          
+        ./limine/limine bios-install genesis_os.iso
+
+    - name: Upload ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: genesis-os-release
+        path: genesis_os.iso        VERBOSE=yes
 
         :Genesis OS GUI (Limbo Ready)
             PROTOCOL=limine
