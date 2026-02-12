@@ -1,40 +1,166 @@
-/* GENESIS OS v3.0 - FLUX GUI EDITION
- * Kernel Bare-metal dengan UI Jendela, Mouse, & Aplikasi Paint
+/* GENESIS OS v4.0 (Stable GRUB Edition)
+ * Kernel 32-bit Multiboot dengan GUI & Mouse
  */
 
 #include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
 
-// --- I/O PORTS ---
 static inline void outb(uint16_t port, uint8_t val) { __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) ); }
 static inline uint8_t inb(uint16_t port) { uint8_t ret; __asm__ volatile ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret; }
 
-// --- LIMINE BOOT PROTOCOL ---
-struct limine_framebuffer {
-    uint64_t address; uint64_t width; uint64_t height; uint64_t pitch;
-    uint16_t bpp; uint8_t memory_model; uint8_t red_mask_size; uint8_t red_mask_shift;
-    uint8_t green_mask_size; uint8_t green_mask_shift; uint8_t blue_mask_size; uint8_t blue_mask_shift;
-};
-struct limine_framebuffer_response { uint64_t revision; uint64_t framebuffer_count; struct limine_framebuffer **framebuffers; };
-struct limine_framebuffer_request { uint64_t id[4]; uint64_t revision; struct limine_framebuffer_response *response; };
-
-static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = {0xc7b1dd30df4c8b88, 0x0a82e883a194f07b}, .revision = 0
-};
+// --- MULTIBOOT INFO ---
+typedef struct {
+    uint32_t flags; uint32_t mem_lower; uint32_t mem_upper; uint32_t boot_device;
+    uint32_t cmdline; uint32_t mods_count; uint32_t mods_addr; uint32_t syms[4];
+    uint32_t mmap_length; uint32_t mmap_addr; uint32_t drives_length; uint32_t drives_addr;
+    uint32_t config_table; uint32_t boot_loader_name; uint32_t apm_table;
+    uint32_t vbe_control_info; uint32_t vbe_mode_info; uint16_t vbe_mode;
+    uint16_t vbe_interface_seg; uint16_t vbe_interface_off; uint16_t vbe_interface_len;
+    uint64_t framebuffer_addr; uint32_t framebuffer_pitch; uint32_t framebuffer_width;
+    uint32_t framebuffer_height; uint8_t framebuffer_bpp; uint8_t framebuffer_type;
+} __attribute__((packed)) multiboot_info_t;
 
 // --- GRAPHICS ENGINE ---
-struct limine_framebuffer *fb = NULL;
+uint32_t* fb_ptr = 0;
+uint32_t fb_width = 0, fb_height = 0, fb_pitch = 0;
 
 void plot(int x, int y, uint32_t color) {
-    if (!fb || x < 0 || x >= (int)fb->width || y < 0 || y >= (int)fb->height) return;
-    *(uint32_t *)(fb->address + y * fb->pitch + x * 4) = color;
+    if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height) return;
+    fb_ptr[y * (fb_pitch / 4) + x] = color;
 }
 
 void draw_rect(int x, int y, int w, int h, uint32_t color) {
     for (int i=0; i<h; i++) for (int j=0; j<w; j++) plot(x+j, y+i, color);
 }
 
+// Font A-Z (5x7)
+const uint8_t font[] = {
+    0x7C,0x12,0x11,0x12,0x7C, 0x7F,0x49,0x49,0x49,0x36, 0x3E,0x41,0x41,0x41,0x22, 0x7F,0x41,0x41,0x22,0x1C, 0x7F,0x49,0x49,0x49,0x41, 0x7F,0x09,0x09,0x09,0x01,
+    0x3E,0x41,0x49,0x49,0x7A, 0x7F,0x08,0x08,0x08,0x7F, 0x00,0x41,0x7F,0x41,0x00, 0x20,0x40,0x41,0x3F,0x01, 0x7F,0x08,0x14,0x22,0x41, 0x7F,0x40,0x40,0x40,0x40,
+    0x7F,0x02,0x0C,0x02,0x7F, 0x7F,0x04,0x08,0x10,0x7F, 0x3E,0x41,0x41,0x41,0x3E, 0x7F,0x09,0x09,0x09,0x06, 0x3E,0x41,0x51,0x21,0x5E, 0x7F,0x09,0x19,0x29,0x46,
+    0x46,0x49,0x49,0x49,0x31, 0x01,0x01,0x7F,0x01,0x01, 0x3F,0x40,0x40,0x40,0x3F, 0x1F,0x20,0x40,0x20,0x1F, 0x3F,0x40,0x38,0x40,0x3F, 0x63,0x14,0x08,0x14,0x63,
+    0x07,0x08,0x70,0x08,0x07, 0x61,0x51,0x49,0x45,0x43
+};
+
+void draw_char(char c, int x, int y, uint32_t color) {
+    if (c == ' ') return; if (c < 'A' || c > 'Z') c = '?';
+    int index = (c - 'A') * 5;
+    for (int i=0; i<5; i++) {
+        uint8_t line = font[index + i];
+        for (int j=0; j<7; j++) {
+            if (line & (1 << j)) {
+                plot(x+i*2, y+j*2, color); plot(x+i*2+1, y+j*2, color);
+                plot(x+i*2, y+j*2+1, color); plot(x+i*2+1, y+j*2+1, color);
+            }
+        }
+    }
+}
+void draw_string(const char* str, int x, int y, uint32_t color) { while (*str) { draw_char(*str, x, y, color); x += 12; str++; } }
+
+// --- MOUSE DRIVER ---
+int mouse_x = 400, mouse_y = 300;
+uint8_t mouse_cycle = 0; int8_t mouse_byte[3];
+bool is_left_click = false;
+
+void init_mouse() {
+    outb(0x64, 0xA8); outb(0x64, 0x20);
+    uint8_t status = inb(0x60) | 2;
+    outb(0x64, 0x60); outb(0x60, status);
+    outb(0x64, 0xD4); outb(0x60, 0xF4); inb(0x60);
+}
+
+void poll_mouse() {
+    if ((inb(0x64) & 1) && (inb(0x64) & 0x20)) {
+        mouse_byte[mouse_cycle++] = inb(0x60);
+        if (mouse_cycle == 3) {
+            mouse_cycle = 0;
+            if ((mouse_byte[0] & 0xC0) == 0) {
+                mouse_x += mouse_byte[1]; mouse_y -= mouse_byte[2];
+                is_left_click = (mouse_byte[0] & 1);
+                if (mouse_x < 0) mouse_x = 0; if (mouse_x > (int)fb_width - 10) mouse_x = (int)fb_width - 10;
+                if (mouse_y < 0) mouse_y = 0; if (mouse_y > (int)fb_height - 10) mouse_y = (int)fb_height - 10;
+            }
+        }
+    }
+}
+
+// --- APPS & LOGIC ---
+#define CW 120
+#define CH 100
+uint32_t canvas[CH][CW];
+uint32_t brush_color = 0x000000;
+
+void render_gui() {
+    // Desktop
+    draw_rect(0, 0, fb_width, fb_height, 0x006666);
+    draw_string("GENESIS OS SYSTEM ACTIVE", 10, 10, 0x00FF00);
+
+    // 1. File Manager
+    draw_rect(40, 40, 300, 200, 0xDDDDDD); draw_rect(40, 40, 300, 20, 0x222222); draw_string("FILE MANAGER", 45, 45, 0xFFFFFF);
+    draw_rect(50, 80, 20, 16, 0xFFD700); draw_string("DRIVE C", 80, 85, 0x000000);
+    
+    // 2. Browser
+    draw_rect(380, 40, 300, 200, 0x303080); draw_rect(380, 40, 300, 20, 0x222222); draw_string("BROWSER", 385, 45, 0xFFFFFF);
+    draw_rect(390, 70, 280, 20, 0xFFFFFF); draw_string("HTTP GENESIS ORG", 395, 75, 0x000000);
+    draw_string("NO INTERNET CONNECTION", 390, 110, 0xFFFFFF);
+
+    // 3. Paint App
+    int px = 200, py = 300;
+    draw_rect(px, py, 350, 200, 0xEEEEEE); draw_rect(px, py, 350, 20, 0x222222); draw_string("PAINT", px+5, py+5, 0xFFFFFF);
+    
+    // Palet Warna
+    draw_rect(px+10, py+30, 20, 20, 0xFF0000); // Merah
+    draw_rect(px+40, py+30, 20, 20, 0x00FF00); // Hijau
+    draw_rect(px+70, py+30, 20, 20, 0x0000FF); // Biru
+    draw_string("COLOR", px+100, py+35, 0x000000);
+
+    if (is_left_click && mouse_y >= py+30 && mouse_y <= py+50) {
+        if (mouse_x >= px+10 && mouse_x <= px+30) brush_color = 0xFF0000;
+        if (mouse_x >= px+40 && mouse_x <= px+60) brush_color = 0x00FF00;
+        if (mouse_x >= px+70 && mouse_x <= px+90) brush_color = 0x0000FF;
+    }
+
+    // Kanvas
+    draw_rect(px+10, py+60, CW, CH, 0xFFFFFF);
+    if (is_left_click && mouse_x >= px+10 && mouse_x < px+10+CW && mouse_y >= py+60 && mouse_y < py+60+CH) {
+        canvas[mouse_y - (py+60)][mouse_x - (px+10)] = brush_color;
+        if (mouse_x - (px+10) + 1 < CW) canvas[mouse_y - (py+60)][mouse_x - (px+10) + 1] = brush_color;
+        if (mouse_y - (py+60) + 1 < CH) canvas[mouse_y - (py+60) + 1][mouse_x - (px+10)] = brush_color;
+    }
+    for (int y = 0; y < CH; y++) {
+        for (int x = 0; x < CW; x++) {
+            if (canvas[y][x] != 0) plot(px+10+x, py+60+y, canvas[y][x]);
+        }
+    }
+}
+
+// --- ENTRY POINT ---
+void kernel_main(multiboot_info_t* mbd, uint32_t magic) {
+    // Validasi Bootloader
+    if (magic != 0x2BADB002 || !(mbd->flags & (1 << 12))) {
+        while(1) __asm__("hlt"); // Berhenti jika tidak ada grafis
+    }
+
+    // Ambil akses ke VRAM Kartu Grafis
+    fb_ptr = (uint32_t*)(uint32_t)(mbd->framebuffer_addr & 0xFFFFFFFF);
+    fb_width = mbd->framebuffer_width;
+    fb_height = mbd->framebuffer_height;
+    fb_pitch = mbd->framebuffer_pitch;
+
+    for(int i=0; i<CH; i++) for(int j=0; j<CW; j++) canvas[i][j] = 0;
+    init_mouse();
+
+    while (1) {
+        poll_mouse();
+        render_gui();
+        
+        // Kursor Mouse
+        draw_rect(mouse_x, mouse_y, 6, 6, is_left_click ? 0xFF0000 : 0xFFFFFF);
+        draw_rect(mouse_x+2, mouse_y+2, 2, 2, 0x000000);
+        
+        for (volatile int wait = 0; wait < 100000; wait++);
+    }
+}
 // Font 5x7 Minimalis
 const uint8_t font[] = {
     0x7C,0x12,0x11,0x12,0x7C, 0x7F,0x49,0x49,0x49,0x36, 0x3E,0x41,0x41,0x41,0x22, 0x7F,0x41,0x41,0x22,0x1C, 0x7F,0x49,0x49,0x49,0x41, 0x7F,0x09,0x09,0x09,0x01,
