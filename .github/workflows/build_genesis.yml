@@ -1,1 +1,70 @@
+name: Build Genesis OS GUI
 
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y llvm clang lld nasm xorriso mtools git wget
+
+    - name: Download Limine Bootloader
+      run: |
+        git clone https://github.com/limine-bootloader/limine.git --branch=v7.x-binary --depth=1
+        make -C limine
+
+    - name: Compile OS Kernel
+      run: |
+        # Compile kode C menjadi sistem operasi Bare-Metal
+        clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -O2 -c kernel.c -o kernel.o
+        ld.lld -nostdlib -z max-page-size=0x1000 -Ttext=0xffffffff80000000 kernel.o -o genesis.bin
+
+    - name: Auto-Generate Boot Config
+      run: |
+        # Script ini mencegah error "no valid entries"
+        cat << 'EOF' > limine.cfg
+        TIMEOUT=0
+        VERBOSE=yes
+
+        :Genesis OS GUI (Limbo Ready)
+            PROTOCOL=limine
+            KERNEL_PATH=boot:///genesis.bin
+        EOF
+
+    - name: Pack ISO
+      run: |
+        mkdir -p iso_root
+        
+        # Pindahkan kernel dan config ke dalam ISO
+        cp genesis.bin iso_root/
+        cp limine.cfg iso_root/
+        
+        # Pindahkan file bootloader
+        cp limine/limine-bios.sys iso_root/
+        cp limine/limine-bios-cd.bin iso_root/
+        cp limine/limine-uefi-cd.bin iso_root/
+        
+        # Bungkus menjadi file .iso
+        xorriso -as mkisofs -b limine-bios-cd.bin \
+          -no-emul-boot -boot-load-size 4 -boot-info-table \
+          --efi-boot limine-uefi-cd.bin \
+          -efi-boot-part --efi-boot-image --protective-msdos-label \
+          iso_root -o genesis_os.iso
+          
+        ./limine/limine bios-install genesis_os.iso
+
+    - name: Upload ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: genesis-os-release
+        path: genesis_os.iso
