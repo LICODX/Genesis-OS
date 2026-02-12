@@ -1,4 +1,4 @@
-name: Build Genesis OS GUI
+name: Build Genesis OS (Stable GRUB)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 jobs:
   build-iso:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v3
@@ -16,25 +16,36 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y llvm clang lld nasm xorriso mtools wget
+        sudo apt-get install -y gcc-multilib nasm xorriso mtools grub-pc-bin grub-common
 
-    - name: Download Limine Bootloader (Fixed Version)
-      run: |
-        # Kita unduh versi biner yang sudah stabil agar tidak error saat di-make
-        wget https://github.com/limine-bootloader/limine/releases/download/v7.14.2/limine-7.14.2-bin.tar.gz
-        tar -xzf limine-7.14.2-bin.tar.gz
-        mv limine-7.14.2-bin limine
+    - name: Compile Bootloader
+      run: nasm -f elf32 boot.asm -o boot.o
 
-    - name: Compile OS Kernel
-      run: |
-        # Compile kode C menjadi sistem operasi Bare-Metal
-        clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -O2 -c kernel.c -o kernel.o
-        ld.lld -nostdlib -z max-page-size=0x1000 -Ttext=0xffffffff80000000 kernel.o -o genesis.bin
+    - name: Compile Kernel
+      run: gcc -m32 -ffreestanding -O2 -Wall -Wextra -c kernel.c -o kernel.o
 
-    - name: Auto-Generate Boot Config (limine.conf)
+    - name: Link Kernel
+      run: ld -m elf_i386 -T linker.ld -o genesis.bin boot.o kernel.o
+
+    - name: Pack ISO
       run: |
-        # Membuat file konfigurasi otomatis dengan ekstensi yang BENAR (.conf)
-        mkdir -p iso_root
+        mkdir -p isodir/boot/grub
+        cp genesis.bin isodir/boot/genesis.bin
+        cat << 'EOF' > isodir/boot/grub/grub.cfg
+        set timeout=0
+        set default=0
+        menuentry "Genesis OS GUI" {
+            multiboot /boot/genesis.bin
+            boot
+        }
+        EOF
+        grub-mkrescue -o genesis_os.iso isodir
+
+    - name: Upload ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: genesis-os-stable
+        path: genesis_os.iso        mkdir -p iso_root
         cat << 'EOF' > iso_root/limine.conf
         TIMEOUT=0
         VERBOSE=yes
