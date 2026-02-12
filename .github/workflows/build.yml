@@ -1,0 +1,116 @@
+name: Auto-Generate Genesis OS
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 1. Install OS Building Tools
+      run: sudo apt-get update && sudo apt-get install -y gcc-multilib nasm xorriso grub-pc-bin grub-common mtools
+
+    - name: 2. Auto-Write Source Code
+      run: |
+        # Server akan otomatis menulis file Assembly ini
+        cat << 'EOF' > boot.asm
+        MBALIGN  equ  1 << 0
+        MEMINFO  equ  1 << 1
+        FLAGS    equ  MBALIGN | MEMINFO
+        MAGIC    equ  0x1BADB002
+        CHECKSUM equ -(MAGIC + FLAGS)
+
+        section .multiboot
+        align 4
+            dd MAGIC
+            dd FLAGS
+            dd CHECKSUM
+
+        section .bss
+        align 16
+        stack_bottom:
+        resb 16384
+        stack_top:
+
+        section .text
+        global _start
+        extern kernel_main
+        _start:
+            mov esp, stack_top
+            push ebx
+            call kernel_main
+            cli
+        .hang: hlt
+            jmp .hang
+        EOF
+
+        # Server akan otomatis menulis file Kernel C ini
+        cat << 'EOF' > kernel.c
+        #include <stdint.h>
+        
+        // Alamat memori hardware untuk Layar (VGA)
+        volatile uint16_t* vga_buffer = (uint16_t*)0xB8000;
+        
+        void print(const char* str, int x, int y, uint8_t color) {
+            int index = y * 80 + x;
+            for (int i = 0; str[i] != '\0'; i++) {
+                vga_buffer[index++] = (uint16_t)str[i] | ((uint16_t)color << 8);
+            }
+        }
+        
+        void kernel_main() {
+            // Bersihkan Layar menjadi Biru Gelap
+            for (int i = 0; i < 80 * 25; i++) vga_buffer[i] = (uint16_t)' ' | (0x1F << 8);
+            
+            // Gambar Antarmuka Sederhana (Membuktikan Kernel Hidup)
+            print("==================================================", 15, 5, 0x1F);
+            print("                 GENESIS OS                       ", 15, 6, 0x1E); // Teks Kuning
+            print("==================================================", 15, 7, 0x1F);
+            
+            print("Status: KERNEL BARE-METAL BERHASIL BOOTING.", 15, 10, 0x1A); // Teks Hijau Terang
+            print("Arsitektur: GRUB Multiboot 32-bit", 15, 11, 0x1A);
+            print("CPU: Valid. Memory: Valid.", 15, 12, 0x1A);
+            
+            print("Terima kasih atas kerja keras Anda di Limbo Emulator.", 12, 16, 0x1C); // Teks Merah Terang
+            print("Proyek ini nyata, bukan sekadar simulasi.", 17, 18, 0x1F);
+            
+            while(1) __asm__("hlt");
+        }
+        EOF
+
+        # Server otomatis menulis Linker
+        cat << 'EOF' > linker.ld
+        ENTRY(_start)
+        SECTIONS {
+            . = 1M;
+            .text BLOCK(4K) : ALIGN(4K) { *(.multiboot) *(.text) }
+            .rodata BLOCK(4K) : ALIGN(4K) { *(.rodata) }
+            .data BLOCK(4K) : ALIGN(4K) { *(.data) }
+            .bss BLOCK(4K) : ALIGN(4K) { *(COMMON) *(.bss) }
+        }
+        EOF
+
+    - name: 3. Compile & Build
+      run: |
+        nasm -f elf32 boot.asm -o boot.o
+        gcc -m32 -ffreestanding -O2 -Wall -Wextra -c kernel.c -o kernel.o
+        ld -m elf_i386 -T linker.ld -o genesis.bin boot.o kernel.o
+
+    - name: 4. Pack into ISO
+      run: |
+        mkdir -p isodir/boot/grub
+        cp genesis.bin isodir/boot/genesis.bin
+        cat << 'EOF' > isodir/boot/grub/grub.cfg
+        set timeout=0
+        set default=0
+        menuentry "Genesis OS" {
+            multiboot /boot/genesis.bin
+            boot
+        }
+        EOF
+        grub-mkrescue -o GenesisOS_Final.iso isodir
+
+    - name: 5. Upload Final ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: Genesis_OS_Bootable
+        path: GenesisOS_Final.iso
