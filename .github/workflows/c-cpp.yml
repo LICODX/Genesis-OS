@@ -1,4 +1,4 @@
-name: Build Genesis OS (UEFI)
+name: Build Genesis OS
 
 on:
   push:
@@ -23,9 +23,9 @@ jobs:
         git clone https://github.com/limine-bootloader/limine.git --branch=v7.x-binary --depth=1
         make -C limine
 
-    - name: Compile Kernel (64-bit Modern)
+    - name: Compile Kernel (64-bit Modern GUI)
       run: |
-        # Compile C Kernel tanpa library standar (Freestanding)
+        # Compile C Kernel tanpa library standar
         clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -O2 -c kernel.c -o kernel.o
         
         # Linking menjadi Binary
@@ -34,18 +34,24 @@ jobs:
     - name: Pack ISO
       run: |
         mkdir -p iso_root
+        
+        # Pindahkan file inti
         cp genesis.bin iso_root/
         cp limine.cfg iso_root/
-        cp limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/
         
-        # Membuat Hybrid ISO (UEFI + BIOS Compatible)
+        # Pindahkan file Bootloader Limine
+        cp limine/limine-bios.sys iso_root/
+        cp limine/limine-bios-cd.bin iso_root/
+        cp limine/limine-uefi-cd.bin iso_root/
+        
+        # Buat ISO File
         xorriso -as mkisofs -b limine-bios-cd.bin \
           -no-emul-boot -boot-load-size 4 -boot-info-table \
           --efi-boot limine-uefi-cd.bin \
           -efi-boot-part --efi-boot-image --protective-msdos-label \
           iso_root -o genesis_os.iso
           
-        # Deploy Bootloader ke ISO
+        # Pasang bootloader ke ISO
         ./limine/limine bios-install genesis_os.iso
 
     - name: Upload ISO Artifact
